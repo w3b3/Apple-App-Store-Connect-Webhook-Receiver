@@ -20,9 +20,14 @@ function verifyWebhookSignature(payload, signature, secret) {
         .update(payload, 'utf8')
         .digest('hex');
     
+    // Ensure both signatures have the same length for timingSafeEqual
+    if (signature.length !== expectedSignature.length) {
+        return false;
+    }
+    
     return crypto.timingSafeEqual(
-        Buffer.from(signature),
-        Buffer.from(expectedSignature)
+        Buffer.from(signature, 'hex'),
+        Buffer.from(expectedSignature, 'hex')
     );
 }
 
