@@ -62,13 +62,22 @@ cd $APP_DIR
 print_status "Installing dependencies..."
 npm install --production
 
-# Create environment file
-print_status "Creating environment file..."
-cat > .env << EOF
+# Create environment file from template
+print_status "Creating environment file from template..."
+if [[ -f "/home/ubuntu/env.example" ]]; then
+    cp /home/ubuntu/env.example .env
+else
+    cat > .env << EOF
 NODE_ENV=production
-PORT=3000
+PORT=3001
 # APP_STORE_WEBHOOK_SECRET=your-webhook-secret-here
+# WEBHOOK_DOMAIN=webhook.yourdomain.com
+# ADMIN_EMAIL=admin@yourdomain.com
 EOF
+fi
+
+# Secure the environment file
+chmod 600 .env
 
 # Create systemd service
 print_status "Creating systemd service..."
@@ -82,7 +91,7 @@ Type=simple
 User=ubuntu
 WorkingDirectory=$APP_DIR
 Environment=NODE_ENV=production
-Environment=PORT=3000
+Environment=PORT=3001
 EnvironmentFile=$APP_DIR/.env
 ExecStart=/usr/bin/node webhook-receiver.js
 Restart=always
@@ -114,7 +123,7 @@ fi
 
 # Test the service
 print_status "Testing webhook receiver..."
-if curl -s http://localhost:3000/health > /dev/null; then
+if curl -s http://localhost:3001/health > /dev/null; then
     print_status "✅ Health check passed!"
 else
     print_warning "Health check failed - service may still be starting"
@@ -132,9 +141,9 @@ print_status "🎉 Deployment complete!"
 echo ""
 echo "📋 Service Information:"
 echo "  - Service name: webhook-receiver"
-echo "  - Port: 3000"
-echo "  - Health check: http://localhost:3000/health"
-echo "  - Webhook endpoint: http://localhost:3000/webhook/app-store-connect"
+echo "  - Port: 3001"
+echo "  - Health check: http://localhost:3001/health"
+echo "  - Webhook endpoint: http://localhost:3001/webhook/app-store-connect"
 echo "  - Application directory: $APP_DIR"
 echo ""
 echo "🔧 Management commands:"

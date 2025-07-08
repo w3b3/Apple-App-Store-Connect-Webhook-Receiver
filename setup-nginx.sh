@@ -30,13 +30,23 @@ if [[ $EUID -eq 0 ]]; then
    exit 1
 fi
 
-# Get domain name
-echo "Enter your domain name for the webhook receiver (e.g., webhook.yourdomain.com):"
-read -r DOMAIN
+# Load environment variables if .env exists
+if [[ -f "/opt/webhook-receiver/.env" ]]; then
+    source /opt/webhook-receiver/.env
+fi
 
-if [[ -z "$DOMAIN" ]]; then
-    print_error "Domain name is required!"
-    exit 1
+# Get domain name (from env or prompt)
+if [[ -n "$WEBHOOK_DOMAIN" ]]; then
+    DOMAIN="$WEBHOOK_DOMAIN"
+    print_status "Using domain from environment: $DOMAIN"
+else
+    echo "Enter your domain name for the webhook receiver (e.g., webhook.yourdomain.com):"
+    read -r DOMAIN
+    
+    if [[ -z "$DOMAIN" ]]; then
+        print_error "Domain name is required!"
+        exit 1
+    fi
 fi
 
 print_status "Using domain: $DOMAIN"
@@ -87,8 +97,11 @@ read -r SETUP_SSL
 if [[ "$SETUP_SSL" =~ ^[Yy]$ ]]; then
     print_status "Setting up SSL certificate with Let's Encrypt..."
     
+    # Get admin email (from env or use default)
+    EMAIL="${ADMIN_EMAIL:-admin@$DOMAIN}"
+    
     # Run certbot
-    if sudo certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --email admin@"$DOMAIN"; then
+    if sudo certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --email "$EMAIL"; then
         print_status "✅ SSL certificate installed successfully"
         
         # Uncomment HTTPS configuration
