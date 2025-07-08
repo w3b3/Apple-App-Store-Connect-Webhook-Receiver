@@ -90,16 +90,20 @@ app.post('/webhook/app-store-connect', (req, res) => {
                 return res.status(401).json({ error: 'Invalid signature' });
             }
             console.log('Webhook signature verified successfully');
-        } else if (webhookSecret) {
-            console.warn('Webhook secret configured but no signature provided');
+        } else if (webhookSecret && !signature) {
+            console.warn('Webhook secret configured but no signature provided - this may be a test webhook');
+            // For test webhooks, we'll continue processing but log the warning
+        } else {
+            console.log('No webhook secret configured - processing webhook without signature verification');
         }
 
         // Process the webhook based on event type
-        const eventType = webhookData.eventType;
+        // Apple sends event type in data.type, not eventType
+        const eventType = webhookData.data?.data?.type || webhookData.data?.type || webhookData.eventType;
         console.log('Processing event type:', eventType);
 
         // Process the webhook event
-        processWebhookEvent(webhookData);
+        processWebhookEvent(webhookData, eventType);
 
         res.status(200).json({ 
             status: 'success',
@@ -115,14 +119,14 @@ app.post('/webhook/app-store-connect', (req, res) => {
 });
 
 // Process different webhook event types
-function processWebhookEvent(event) {
+function processWebhookEvent(event, eventType) {
     console.log('Processing webhook event:', {
-        eventType: event.eventType,
+        eventType: eventType,
         timestamp: new Date().toISOString(),
         data: event
     });
 
-    switch (event.eventType) {
+    switch (eventType) {
         case 'APP_STORE_VERSION_STATE_CHANGED':
             console.log('App Store version state changed:', event);
             break;
@@ -150,8 +154,11 @@ function processWebhookEvent(event) {
         case 'PING':
             console.log('Ping event received (test webhook):', event);
             break;
+        case 'webhookPingCreated':
+            console.log('Webhook ping created (Apple test event):', event);
+            break;
         default:
-            console.log('Unknown event type:', event.eventType, event);
+            console.log('Unknown event type:', eventType, event);
     }
 
     // TODO: Add Firestore integration here
