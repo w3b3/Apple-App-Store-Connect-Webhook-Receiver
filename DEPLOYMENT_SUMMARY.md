@@ -15,6 +15,7 @@ Your Apple App Store Connect Webhook Receiver has been successfully deployed and
 
 - **Health Check**: `https://apple.emitajuba.com.br/health`
 - **Webhook Endpoint**: `https://apple.emitajuba.com.br/webhook/app-store-connect`
+- **Server Notifications**: `https://apple.emitajuba.com.br/webhook/app-store-server-notifications`
 - **Root Info**: `https://apple.emitajuba.com.br/`
 
 ### 🔐 Security Configuration
@@ -52,22 +53,36 @@ sudo systemctl reload nginx
 sudo certbot renew
 ```
 
+### 🎯 **Two Types of Apple Webhooks**
+
+Your server now handles **both** types of Apple webhook notifications:
+
+#### **1. App Store Connect Webhooks**
+- **URL**: `https://apple.emitajuba.com.br/webhook/app-store-connect`
+- **Purpose**: App Store Connect events (TestFlight, app reviews, app state changes)
+- **Configuration**: App Store Connect → Integrations → Webhooks
+- **Signatures**: Optional (test webhooks don't have signatures)
+- **Events**: `webhookPingCreated`, `APP_STORE_VERSION_STATE_CHANGED`, `TESTFLIGHT_BETA_FEEDBACK_RECEIVED`
+
+#### **2. App Store Server Notifications**
+- **URL**: `https://apple.emitajuba.com.br/webhook/app-store-server-notifications`
+- **Purpose**: In-app purchase events (subscriptions, purchases, refunds)
+- **Configuration**: App Store Connect → [Your App] → Distribution → App Store Server Notifications
+- **Signatures**: Always present (JWT format, verification required)
+- **Events**: `SUBSCRIBED`, `DID_RENEW`, `EXPIRED`, `DID_CANCEL`, `REFUND`
+
 ### 📝 Apple App Store Connect Configuration
 
-When configuring the webhook in Apple App Store Connect:
+When configuring webhooks in Apple App Store Connect:
 
+**For App Store Connect Webhooks**:
 1. **Webhook URL**: `https://apple.emitajuba.com.br/webhook/app-store-connect`
 2. **Shared Secret**: `56e3d99750140f8c99a27802e9a34dac4e92aba8e0a7335c8198002ed06b21c2`
-3. **Supported Event Types**:
-   - APP_STORE_VERSION_STATE_CHANGED
-   - TESTFLIGHT_BETA_FEEDBACK_RECEIVED
-   - SUBSCRIPTION_PURCHASED
-   - SUBSCRIPTION_RENEWED
-   - SUBSCRIPTION_EXPIRED
-   - SUBSCRIPTION_REFUNDED
-   - SUBSCRIPTION_GRACE_PERIOD_EXPIRED
-   - SUBSCRIPTION_OFFER_REDEEMED
-   - PING (for testing)
+
+**For App Store Server Notifications**:
+1. **Production Server URL**: `https://apple.emitajuba.com.br/webhook/app-store-server-notifications`
+2. **Sandbox Server URL**: `https://apple.emitajuba.com.br/webhook/app-store-server-notifications`
+3. **Version**: Select Version 2 (recommended)
 
 ### ✅ Test Results
 
@@ -115,11 +130,14 @@ curl -X POST \
 
 ### 🔄 Future Firestore Integration
 
-The webhook receiver is ready for Firestore integration. Update the `processWebhookEvent()` function in `webhook-receiver.js` to store events in Firestore:
+The webhook receiver is ready for Firestore integration. Update the processing functions to store events in Firestore:
 
 ```javascript
-// TODO: Add Firestore integration
+// For App Store Connect webhooks
 // storeEventInFirestore(event);
+
+// For App Store Server Notifications
+// storePurchaseEventInFirestore(decodedNotification);
 ```
 
 ### 🛠️ Monitoring
@@ -167,9 +185,10 @@ Webhook ping created (Apple test event): {event data}
 ---
 
 **Next Steps**:
-1. Configure the webhook in Apple App Store Connect
+1. Configure webhooks in Apple App Store Connect (both types)
 2. Test webhook delivery from Apple
-3. Implement Firestore integration when ready
-4. Set up monitoring and alerting as needed
+3. Implement JWT signature verification for server notifications
+4. Implement Firestore integration when ready
+5. Set up monitoring and alerting as needed
 
-**Support**: Check the logs if you encounter any issues, and ensure the service is running and nginx is properly configured. 
+**Support**: Check the logs if you encounter any issues, and ensure the service is running and nginx is properly configured.

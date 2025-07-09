@@ -48,7 +48,8 @@ app.get('/', (req, res) => {
         version: '1.0.0',
         endpoints: {
             health: '/health',
-            webhook: '/webhook/app-store-connect'
+            webhook: '/webhook/app-store-connect',
+            serverNotifications: '/webhook/app-store-server-notifications'
         }
     });
 });
@@ -118,6 +119,58 @@ app.post('/webhook/app-store-connect', (req, res) => {
     }
 });
 
+// Apple App Store Server Notifications endpoint
+app.post('/webhook/app-store-server-notifications', (req, res) => {
+    try {
+        const payload = req.body;
+        
+        // Log the incoming server notification
+        console.log('Received App Store Server Notification:', {
+            timestamp: new Date().toISOString(),
+            headers: {
+                'user-agent': req.headers['user-agent'],
+                'content-type': req.headers['content-type']
+            },
+            payloadSize: Buffer.isBuffer(payload) ? payload.length : JSON.stringify(payload).length
+        });
+
+        // Convert buffer to string for parsing
+        const payloadString = Buffer.isBuffer(payload) ? payload.toString('utf8') : JSON.stringify(payload);
+        
+        // Parse JSON payload
+        let notificationData;
+        try {
+            notificationData = JSON.parse(payloadString);
+        } catch (parseError) {
+            console.error('Failed to parse server notification payload:', parseError);
+            return res.status(400).json({ error: 'Invalid JSON payload' });
+        }
+
+        // App Store Server Notifications always have a signedPayload
+        if (!notificationData.signedPayload) {
+            console.error('Missing signedPayload in server notification');
+            return res.status(400).json({ error: 'Missing signedPayload' });
+        }
+
+        // TODO: Implement JWT signature verification
+        // For now, we'll process without verification but log the payload
+        console.log('Server notification signedPayload present:', notificationData.signedPayload.substring(0, 50) + '...');
+        
+        // Process the server notification
+        processServerNotification(notificationData);
+
+        res.status(200).json({ 
+            status: 'success',
+            message: 'Server notification processed successfully',
+            timestamp: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error('Error processing server notification:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 // Process different webhook event types
 function processWebhookEvent(event, eventType) {
     console.log('Processing webhook event:', {
@@ -164,6 +217,32 @@ function processWebhookEvent(event, eventType) {
     // TODO: Add Firestore integration here
     // For now, we'll just log the events
     // Future: storeEventInFirestore(event);
+}
+
+// Process App Store Server Notifications (in-app purchases)
+function processServerNotification(notification) {
+    console.log('Processing server notification:', {
+        timestamp: new Date().toISOString(),
+        hasSignedPayload: !!notification.signedPayload
+    });
+
+    // TODO: Decode and verify the JWT signedPayload
+    // The signedPayload contains the actual notification data
+    // For now, we'll just log that we received it
+    
+    console.log('Server notification received - signedPayload needs JWT decoding');
+    
+    // TODO: After JWT decoding, you'll get notification types like:
+    // - SUBSCRIBED
+    // - DID_RENEW
+    // - EXPIRED
+    // - DID_CANCEL
+    // - REFUND
+    // - PRICE_INCREASE
+    // - GRACE_PERIOD_EXPIRED
+    
+    // TODO: Add Firestore integration for purchase events
+    // storePurchaseEventInFirestore(decodedNotification);
 }
 
 // Error handling middleware
