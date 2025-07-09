@@ -70,6 +70,7 @@ Your server now handles **both** types of Apple webhook notifications:
 - **Configuration**: App Store Connect → [Your App] → Distribution → App Store Server Notifications
 - **Signatures**: Always present (JWT format, verification required)
 - **Events**: `SUBSCRIBED`, `DID_RENEW`, `EXPIRED`, `DID_CANCEL`, `REFUND`
+- **Security**: ✅ **JWT signature verification implemented**
 
 ### 📝 Apple App Store Connect Configuration
 
@@ -110,6 +111,16 @@ curl -X POST \
 - Apple App Store Connect Test button successfully sends webhooks
 - Events are properly processed and logged
 - No signature verification issues with test events
+
+**JWT Signature Verification**: ✅ Working
+```bash
+# Test with invalid JWT (should be rejected)
+curl -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"signedPayload":"invalid.jwt.token"}' \
+  https://apple.emitajuba.com.br/webhook/app-store-server-notifications
+# Response: {"error":"Invalid JWT signature"}
+```
 
 ### 📁 File Structure
 
@@ -187,8 +198,9 @@ Webhook ping created (Apple test event): {event data}
 **Next Steps**:
 1. Configure webhooks in Apple App Store Connect (both types)
 2. Test webhook delivery from Apple
-3. Implement JWT signature verification for server notifications
-4. Implement Firestore integration when ready
-5. Set up monitoring and alerting as needed
+3. ✅ **COMPLETED**: Implement JWT signature verification for server notifications
+4. 🔄 **NEXT**: Add Firestore integration for both types
+5. 🔄 **TODO**: Add proper error handling and retry logic
+6. Set up monitoring and alerting as needed
 
 **Support**: Check the logs if you encounter any issues, and ensure the service is running and nginx is properly configured.

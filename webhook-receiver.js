@@ -1,7 +1,57 @@
 const express = require('express');
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
+const jwksClient = require('jwks-rsa');
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// JWKS client for Apple's public keys
+const client = jwksClient({
+    jwksUri: 'https://www.apple.com/certificateauthority/Apple_App_Store_Connect_Signing_Key.jwks',
+    cache: true,
+    cacheMaxAge: 86400000, // 24 hours
+    timeout: 30000
+});
+
+// Get Apple's signing key for JWT verification
+function getAppleSigningKey(header, callback) {
+    client.getSigningKey(header.kid, (err, key) => {
+        if (err) {
+            console.error('Error getting Apple signing key:', err);
+            return callback(err);
+        }
+        const signingKey = key.publicKey || key.rsaPublicKey;
+        callback(null, signingKey);
+    });
+}
+
+// Verify Apple JWT signature
+async function verifyAppleJWT(token) {
+    return new Promise((resolve, reject) => {
+        // First decode without verification to get the header
+        const decoded = jwt.decode(token, { complete: true });
+        if (!decoded) {
+            return reject(new Error('Invalid JWT token'));
+        }
+
+        // Get the signing key and verify
+        getAppleSigningKey(decoded.header, (err, key) => {
+            if (err) {
+                return reject(err);
+            }
+
+            try {
+                const verified = jwt.verify(token, key, {
+                    algorithms: ['ES256'],
+                    issuer: 'https://appleid.apple.com'
+                });
+                resolve(verified);
+            } catch (verifyErr) {
+                reject(verifyErr);
+            }
+        });
+    });
+}
 
 // Middleware to capture raw body for signature verification on webhook routes
 app.use('/webhook', express.raw({ type: 'application/json', limit: '10mb' }));
@@ -120,7 +170,7 @@ app.post('/webhook/app-store-connect', (req, res) => {
 });
 
 // Apple App Store Server Notifications endpoint
-app.post('/webhook/app-store-server-notifications', (req, res) => {
+app.post('/webhook/app-store-server-notifications', async (req, res) => {
     try {
         const payload = req.body;
         
@@ -152,12 +202,19 @@ app.post('/webhook/app-store-server-notifications', (req, res) => {
             return res.status(400).json({ error: 'Missing signedPayload' });
         }
 
-        // TODO: Implement JWT signature verification
-        // For now, we'll process without verification but log the payload
-        console.log('Server notification signedPayload present:', notificationData.signedPayload.substring(0, 50) + '...');
+        // Verify JWT signature
+        let decodedPayload;
+        try {
+            console.log('Verifying JWT signature for server notification...');
+            decodedPayload = await verifyAppleJWT(notificationData.signedPayload);
+            console.log('JWT signature verified successfully');
+        } catch (jwtError) {
+            console.error('JWT signature verification failed:', jwtError.message);
+            return res.status(401).json({ error: 'Invalid JWT signature' });
+        }
         
-        // Process the server notification
-        processServerNotification(notificationData);
+        // Process the server notification with decoded payload
+        processServerNotification(notificationData, decodedPayload);
 
         res.status(200).json({ 
             status: 'success',
@@ -220,29 +277,81 @@ function processWebhookEvent(event, eventType) {
 }
 
 // Process App Store Server Notifications (in-app purchases)
-function processServerNotification(notification) {
+function processServerNotification(notification, decodedPayload) {
     console.log('Processing server notification:', {
         timestamp: new Date().toISOString(),
-        hasSignedPayload: !!notification.signedPayload
+        hasSignedPayload: !!notification.signedPayload,
+        notificationType: decodedPayload?.notificationType,
+        subtype: decodedPayload?.subtype
     });
 
-    // TODO: Decode and verify the JWT signedPayload
-    // The signedPayload contains the actual notification data
-    // For now, we'll just log that we received it
-    
-    console.log('Server notification received - signedPayload needs JWT decoding');
-    
-    // TODO: After JWT decoding, you'll get notification types like:
-    // - SUBSCRIBED
-    // - DID_RENEW
-    // - EXPIRED
-    // - DID_CANCEL
-    // - REFUND
-    // - PRICE_INCREASE
-    // - GRACE_PERIOD_EXPIRED
+    // Extract notification details from decoded JWT
+    const notificationType = decodedPayload?.notificationType;
+    const subtype = decodedPayload?.subtype;
+    const data = decodedPayload?.data;
+
+    console.log('Server notification details:', {
+        notificationType,
+        subtype,
+        bundleId: data?.bundleId,
+        environment: data?.environment
+    });
+
+    // Process different notification types
+    switch (notificationType) {
+        case 'SUBSCRIBED':
+            console.log('New subscription:', {
+                productId: data?.latestReceiptInfo?.product_id,
+                transactionId: data?.latestReceiptInfo?.transaction_id
+            });
+            break;
+        case 'DID_RENEW':
+            console.log('Subscription renewed:', {
+                productId: data?.latestReceiptInfo?.product_id,
+                transactionId: data?.latestReceiptInfo?.transaction_id
+            });
+            break;
+        case 'EXPIRED':
+            console.log('Subscription expired:', {
+                productId: data?.latestReceiptInfo?.product_id,
+                expirationReason: subtype
+            });
+            break;
+        case 'DID_CANCEL':
+            console.log('Subscription cancelled:', {
+                productId: data?.latestReceiptInfo?.product_id,
+                cancellationReason: subtype
+            });
+            break;
+        case 'REFUND':
+            console.log('Purchase refunded:', {
+                productId: data?.latestReceiptInfo?.product_id,
+                transactionId: data?.latestReceiptInfo?.transaction_id
+            });
+            break;
+        case 'PRICE_INCREASE':
+            console.log('Price increase consent:', {
+                productId: data?.latestReceiptInfo?.product_id,
+                consentStatus: subtype
+            });
+            break;
+        case 'GRACE_PERIOD_EXPIRED':
+            console.log('Grace period expired:', {
+                productId: data?.latestReceiptInfo?.product_id
+            });
+            break;
+        case 'TEST':
+            console.log('Test notification received');
+            break;
+        default:
+            console.log('Unknown notification type:', notificationType, {
+                subtype,
+                data
+            });
+    }
     
     // TODO: Add Firestore integration for purchase events
-    // storePurchaseEventInFirestore(decodedNotification);
+    // storePurchaseEventInFirestore(decodedPayload);
 }
 
 // Error handling middleware
