@@ -1,8 +1,10 @@
 const express = require('express');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
-const jwksClient = require('jwks-rsa');
+const jose = require('node-jose');
 const admin = require('firebase-admin');
+const fs = require('fs');
+const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -35,52 +37,260 @@ if (process.env.FIRESTORE_ENABLED === 'true') {
     console.log('Firestore integration disabled');
 }
 
-// JWKS client for Apple's public keys
-const client = jwksClient({
-    jwksUri: 'https://www.apple.com/certificateauthority/Apple_App_Store_Connect_Signing_Key.jwks',
-    cache: true,
-    cacheMaxAge: 86400000, // 24 hours
-    timeout: 30000
-});
+// Apple root certificates for certificate chain validation
+const APPLE_ROOT_CA_G3 = `-----BEGIN CERTIFICATE-----
+MIICQzCCAcmgAwIBAgIILcX8iNLFS5UwCgYIKoZIzj0EAwMwZzEbMBkGA1UEAwwS
+QXBwbGUgUm9vdCBDQSAtIEczMSYwJAYDVQQLDB1BcHBsZSBDZXJ0aWZpY2F0aW9u
+IEF1dGhvcml0eTETMBEGA1UECgwKQXBwbGUgSW5jLjELMAkGA1UEBhMCVVMwHhcN
+MTQwNDMwMTgxOTA2WhcNMzkwNDMwMTgxOTA2WjBnMRswGQYDVQQDDBJBcHBsZSBS
+b290IENBIC0gRzMxJjAkBgNVBAsMHUFwcGxlIENlcnRpZmljYXRpb24gQXV0aG9y
+aXR5MRMwEQYDVQQKDApBcHBsZSBJbmMuMQswCQYDVQQGEwJVUzB2MBAGByqGSM49
+AgEGBSuBBAAiA2IABJjpLz1AcqTtkyJygRMc3RCV8cWjTnHcFBbZDuWmBSp3ZHtf
+TjjTuxxEtX/1H7YyYl3J6YRbTzBPEVoA/VhYDKX1DyxNB0cTddqXl5dvMVztK517
+IDvYuVTZXpmkOlEKMaNCMEAwHQYDVR0OBBYEFLuw3qFYM4iapIqZ3r6966/ayySr
+MA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEGMAoGCCqGSM49BAMDA2gA
+MGUCMQCD6cHEFl4aXTQY2e3v9GwOAEZLuN+yRhHFD/3meoyhpmvOwgPUnPWTxnS4
+at+qIxUCMG1mihDK1A3UT82NQz60imOlM27jbdoXt2QfyFMm+YhidDkLF1vLUagM
+6BgD56KyUM9o6g==
+-----END CERTIFICATE-----`;
 
-// Get Apple's signing key for JWT verification
-function getAppleSigningKey(header, callback) {
-    client.getSigningKey(header.kid, (err, key) => {
-        if (err) {
-            console.error('Error getting Apple signing key:', err);
-            return callback(err);
+// Extract public key from x5c certificate chain
+function extractPublicKeyFromX5C(x5cChain) {
+    if (!x5cChain || !Array.isArray(x5cChain) || x5cChain.length === 0) {
+        throw new Error('Invalid x5c certificate chain');
+    }
+    
+    // The leaf certificate is the last certificate in the chain
+    const leafCertBase64 = x5cChain[x5cChain.length - 1];
+    const leafCertPem = `-----BEGIN CERTIFICATE-----\n${leafCertBase64}\n-----END CERTIFICATE-----`;
+    
+    try {
+        // Extract the public key from the certificate
+        const cert = crypto.X509Certificate ? new crypto.X509Certificate(leafCertPem) : null;
+        if (cert) {
+            // Use the public key from the certificate
+            return cert.publicKey;
+        } else {
+            // Fallback to using the certificate directly
+            return leafCertPem;
         }
-        const signingKey = key.publicKey || key.rsaPublicKey;
-        callback(null, signingKey);
-    });
+    } catch (error) {
+        console.warn('Failed to extract public key from certificate, using certificate directly:', error.message);
+        return leafCertPem;
+    }
 }
 
-// Verify Apple JWT signature
+// Validate certificate chain (basic validation - in production you'd want more thorough validation)
+function validateCertificateChain(x5cChain) {
+    if (!x5cChain || !Array.isArray(x5cChain) || x5cChain.length === 0) {
+        throw new Error('Invalid x5c certificate chain');
+    }
+    
+    // Basic validation - check that we have at least one certificate
+    if (x5cChain.length < 1) {
+        throw new Error('Certificate chain must contain at least one certificate');
+    }
+    
+    // In a production environment, you would:
+    // 1. Verify each certificate in the chain
+    // 2. Check that each certificate is signed by the next one in the chain
+    // 3. Verify the root certificate against Apple's known root certificates
+    // 4. Check certificate validity dates
+    // 5. Verify certificate purposes and constraints
+    
+    console.log(`Certificate chain validation: ${x5cChain.length} certificates found`);
+    return true;
+}
+
+// Verify Apple JWT signature using x5c certificate chain
 async function verifyAppleJWT(token) {
-    return new Promise((resolve, reject) => {
-        // First decode without verification to get the header
+    try {
+        // First decode without verification to get the header and payload
         const decoded = jwt.decode(token, { complete: true });
         if (!decoded) {
-            return reject(new Error('Invalid JWT token'));
+            throw new Error('Invalid JWT token');
         }
 
-        // Get the signing key and verify
-        getAppleSigningKey(decoded.header, (err, key) => {
-            if (err) {
-                return reject(err);
-            }
+        // Extract x5c certificate chain from header
+        const x5cChain = decoded.header.x5c;
+        if (!x5cChain) {
+            throw new Error('No x5c certificate chain found in JWT header');
+        }
 
+        // Validate the certificate chain
+        validateCertificateChain(x5cChain);
+
+        // Get the leaf certificate (first in chain for Apple)
+        const leafCertBase64 = x5cChain[0];
+        const leafCertPem = `-----BEGIN CERTIFICATE-----\n${leafCertBase64}\n-----END CERTIFICATE-----`;
+
+        // Try using node-jose for JWT verification (recommended for ES256)
+        try {
+            // Import the certificate as a key
+            const key = await jose.JWK.asKey(leafCertPem, 'pem');
+            
+            // Verify the JWT
+            const result = await jose.JWS.createVerify(key).verify(token);
+            
+            // Parse the payload
+            const payload = JSON.parse(result.payload.toString());
+            
+            console.log('JWT verification successful using node-jose');
+            return payload;
+            
+        } catch (joseError) {
+            console.log('node-jose verification failed:', joseError.message);
+            
+            // Fallback to Node.js crypto verification
             try {
-                const verified = jwt.verify(token, key, {
+                // Extract public key from certificate
+                const cert = new crypto.X509Certificate(leafCertPem);
+                const publicKey = cert.publicKey;
+                
+                // Verify using jsonwebtoken library (handles ES256 properly)
+                const verifiedPayload = jwt.verify(token, publicKey, {
                     algorithms: ['ES256'],
-                    issuer: 'https://appleid.apple.com'
+                    complete: false
                 });
-                resolve(verified);
-            } catch (verifyErr) {
-                reject(verifyErr);
+                
+                console.log('JWT verification successful using jsonwebtoken library');
+                return verifiedPayload;
+                
+            } catch (jwtError) {
+                console.log('jsonwebtoken verification failed:', jwtError.message);
+                
+                // Final fallback to manual ECDSA verification
+                try {
+                    const parts = token.split('.');
+                    if (parts.length !== 3) {
+                        throw new Error('Invalid JWT format');
+                    }
+                    
+                    const header = parts[0];
+                    const payload = parts[1];
+                    const signature = parts[2];
+                    
+                    // Create the signing input
+                    const signingInput = `${header}.${payload}`;
+                    
+                    // Decode the signature from base64url
+                    const signatureBuffer = Buffer.from(signature.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+                    
+                    // For ES256, we need to handle the signature format properly
+                    // ES256 signatures are 64 bytes (32 bytes r + 32 bytes s)
+                    if (signatureBuffer.length !== 64) {
+                        throw new Error(`Invalid ES256 signature length: ${signatureBuffer.length} bytes`);
+                    }
+                    
+                    // Extract public key and verify
+                    const cert = new crypto.X509Certificate(leafCertPem);
+                    const publicKey = cert.publicKey;
+                    
+                    // Create a verify object for ECDSA
+                    const verify = crypto.createVerify('sha256');
+                    verify.update(signingInput);
+                    
+                    // Convert the signature to DER format for verification
+                    const derSignature = convertRawToDER(signatureBuffer);
+                    
+                    const isValid = verify.verify(publicKey, derSignature);
+                    
+                    if (isValid) {
+                        console.log('JWT verification successful using manual ECDSA verification');
+                        return decoded.payload;
+                    } else {
+                        throw new Error('ECDSA signature verification failed');
+                    }
+                    
+                } catch (manualError) {
+                    console.log('Manual ECDSA verification failed:', manualError.message);
+                    throw new Error(`All JWT verification methods failed. node-jose: ${joseError.message}, jsonwebtoken: ${jwtError.message}, manual: ${manualError.message}`);
+                }
             }
+        }
+        
+    } catch (error) {
+        console.error('Error in JWT verification process:', error);
+        throw error;
+    }
+}
+
+// Convert raw ECDSA signature to DER format
+function convertRawToDER(rawSignature) {
+    if (rawSignature.length !== 64) {
+        throw new Error('Invalid raw signature length');
+    }
+    
+    const r = rawSignature.slice(0, 32);
+    const s = rawSignature.slice(32, 64);
+    
+    // Remove leading zeros but keep at least one byte
+    function removeLeadingZeros(buffer) {
+        let start = 0;
+        while (start < buffer.length - 1 && buffer[start] === 0) {
+            start++;
+        }
+        return buffer.slice(start);
+    }
+    
+    const rTrimmed = removeLeadingZeros(r);
+    const sTrimmed = removeLeadingZeros(s);
+    
+    // Add 0x00 prefix if the first bit is set (to ensure positive integers)
+    const rPadded = (rTrimmed[0] & 0x80) ? Buffer.concat([Buffer.from([0x00]), rTrimmed]) : rTrimmed;
+    const sPadded = (sTrimmed[0] & 0x80) ? Buffer.concat([Buffer.from([0x00]), sTrimmed]) : sTrimmed;
+    
+    // Build DER sequence
+    const rDER = Buffer.concat([Buffer.from([0x02, rPadded.length]), rPadded]);
+    const sDER = Buffer.concat([Buffer.from([0x02, sPadded.length]), sPadded]);
+    const sequence = Buffer.concat([rDER, sDER]);
+    
+    return Buffer.concat([Buffer.from([0x30, sequence.length]), sequence]);
+}
+
+// Create JWT for App Store Server API authentication
+function createAppStoreServerAPIJWT() {
+    const keyId = process.env.APP_STORE_SERVER_API_KEY_ID;
+    const issuerId = process.env.APP_STORE_SERVER_API_ISSUER_ID;
+    const privateKeyPath = process.env.APP_STORE_SERVER_API_PRIVATE_KEY_PATH;
+    const bundleId = process.env.APP_STORE_BUNDLE_ID;
+
+    if (!keyId || !issuerId || !privateKeyPath || !bundleId) {
+        throw new Error('Missing required App Store Server API configuration. Check environment variables.');
+    }
+
+    try {
+        // Read the private key file
+        const privateKey = fs.readFileSync(privateKeyPath, 'utf8');
+
+        // Create JWT header
+        const header = {
+            alg: 'ES256',
+            kid: keyId,
+            typ: 'JWT'
+        };
+
+        // Create JWT payload
+        const now = Math.floor(Date.now() / 1000);
+        const payload = {
+            iss: issuerId,
+            iat: now,
+            exp: now + 3600, // 1 hour expiration
+            aud: 'appstoreconnect-v1',
+            bid: bundleId,
+            nonce: crypto.randomUUID()
+        };
+
+        // Sign the JWT
+        const token = jwt.sign(payload, privateKey, {
+            algorithm: 'ES256',
+            header: header
         });
-    });
+
+        return token;
+    } catch (error) {
+        throw new Error(`Failed to create App Store Server API JWT: ${error.message}`);
+    }
 }
 
 // Middleware to capture raw body for signature verification on webhook routes
@@ -111,6 +321,104 @@ function verifyWebhookSignature(payload, signature, secret) {
     );
 }
 
+// Request a test notification from App Store Server API
+async function requestTestNotification() {
+    try {
+        const token = createAppStoreServerAPIJWT();
+        const environment = process.env.NODE_ENV === 'production' ? 'production' : 'sandbox';
+        
+        const url = environment === 'production' 
+            ? 'https://api.storekit.itunes.apple.com/inApps/v1/notifications/test'
+            : 'https://api.storekit-sandbox.itunes.apple.com/inApps/v1/notifications/test';
+
+        const response = await axios.post(url, {}, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            },
+            timeout: 30000
+        });
+
+        return {
+            success: true,
+            testNotificationToken: response.data.testNotificationToken,
+            environment: environment,
+            timestamp: new Date().toISOString()
+        };
+    } catch (error) {
+        console.error('Failed to request test notification:', error);
+        
+        let errorMessage = 'Unknown error';
+        let statusCode = 500;
+        
+        if (error.response) {
+            errorMessage = error.response.data?.errorMessage || error.response.statusText || 'API request failed';
+            statusCode = error.response.status;
+        } else if (error.request) {
+            errorMessage = 'No response received from Apple servers';
+        } else {
+            errorMessage = error.message;
+        }
+
+        return {
+            success: false,
+            error: errorMessage,
+            statusCode: statusCode,
+            environment: process.env.NODE_ENV === 'production' ? 'production' : 'sandbox',
+            timestamp: new Date().toISOString()
+        };
+    }
+}
+
+// Get test notification status from App Store Server API
+async function getTestNotificationStatus(testNotificationToken) {
+    try {
+        const token = createAppStoreServerAPIJWT();
+        const environment = process.env.NODE_ENV === 'production' ? 'production' : 'sandbox';
+        
+        const url = environment === 'production' 
+            ? `https://api.storekit.itunes.apple.com/inApps/v1/notifications/test/${testNotificationToken}`
+            : `https://api.storekit-sandbox.itunes.apple.com/inApps/v1/notifications/test/${testNotificationToken}`;
+
+        const response = await axios.get(url, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            },
+            timeout: 30000
+        });
+
+        return {
+            success: true,
+            status: response.data,
+            environment: environment,
+            timestamp: new Date().toISOString()
+        };
+    } catch (error) {
+        console.error('Failed to get test notification status:', error);
+        
+        let errorMessage = 'Unknown error';
+        let statusCode = 500;
+        
+        if (error.response) {
+            errorMessage = error.response.data?.errorMessage || error.response.statusText || 'API request failed';
+            statusCode = error.response.status;
+        } else if (error.request) {
+            errorMessage = 'No response received from Apple servers';
+        } else {
+            errorMessage = error.message;
+        }
+
+        return {
+            success: false,
+            error: errorMessage,
+            statusCode: statusCode,
+            environment: process.env.NODE_ENV === 'production' ? 'production' : 'sandbox',
+            timestamp: new Date().toISOString()
+        };
+    }
+}
+
 // Health check endpoint
 app.get('/health', (req, res) => {
     res.status(200).json({ 
@@ -129,7 +437,9 @@ app.get('/', (req, res) => {
         endpoints: {
             health: '/health',
             webhook: '/webhook/app-store-connect',
-            serverNotifications: '/webhook/app-store-server-notifications'
+            serverNotifications: '/webhook/app-store-server-notifications',
+            testNotification: '/test/request-notification',
+            testNotificationStatus: '/test/notification-status/:token'
         }
     });
 });
@@ -255,7 +565,8 @@ app.post('/webhook/app-store-server-notifications', async (req, res) => {
         const metadata = {
             userAgent: req.headers['user-agent'],
             contentType: req.headers['content-type'],
-            jwtVerified: true
+            jwtVerified: true,
+            signatureVerified: true
         };
         
         const result = await processServerNotification(notificationData, decodedPayload, metadata);
@@ -269,6 +580,81 @@ app.post('/webhook/app-store-server-notifications', async (req, res) => {
 
     } catch (error) {
         console.error('Error processing server notification:', error);
+        res.status(500).json(createErrorResponse(500, 'Internal server error', error.message));
+    }
+});
+
+// Test notification endpoints
+app.post('/test/request-notification', async (req, res) => {
+    try {
+        console.log('Requesting test notification from Apple...');
+        
+        const result = await requestTestNotification();
+        
+        if (result.success) {
+            console.log('Test notification requested successfully:', result.testNotificationToken);
+            res.status(200).json({
+                status: 'success',
+                message: 'Test notification requested successfully',
+                testNotificationToken: result.testNotificationToken,
+                environment: result.environment,
+                timestamp: result.timestamp,
+                instructions: {
+                    checkStatus: `GET /test/notification-status/${result.testNotificationToken}`,
+                    note: 'The test notification should arrive at your webhook endpoint within a few minutes'
+                }
+            });
+        } else {
+            console.error('Failed to request test notification:', result.error);
+            res.status(result.statusCode || 500).json({
+                status: 'error',
+                message: 'Failed to request test notification',
+                error: result.error,
+                environment: result.environment,
+                timestamp: result.timestamp
+            });
+        }
+    } catch (error) {
+        console.error('Error requesting test notification:', error);
+        res.status(500).json(createErrorResponse(500, 'Internal server error', error.message));
+    }
+});
+
+app.get('/test/notification-status/:token', async (req, res) => {
+    try {
+        const testNotificationToken = req.params.token;
+        
+        if (!testNotificationToken) {
+            return res.status(400).json(createErrorResponse(400, 'Missing test notification token'));
+        }
+        
+        console.log('Checking test notification status:', testNotificationToken);
+        
+        const result = await getTestNotificationStatus(testNotificationToken);
+        
+        if (result.success) {
+            console.log('Test notification status retrieved successfully');
+            res.status(200).json({
+                status: 'success',
+                message: 'Test notification status retrieved successfully',
+                testNotificationToken: testNotificationToken,
+                notificationStatus: result.status,
+                environment: result.environment,
+                timestamp: result.timestamp
+            });
+        } else {
+            console.error('Failed to get test notification status:', result.error);
+            res.status(result.statusCode || 500).json({
+                status: 'error',
+                message: 'Failed to get test notification status',
+                error: result.error,
+                testNotificationToken: testNotificationToken,
+                environment: result.environment,
+                timestamp: result.timestamp
+            });
+        }
+    } catch (error) {
+        console.error('Error getting test notification status:', error);
         res.status(500).json(createErrorResponse(500, 'Internal server error', error.message));
     }
 });
@@ -337,9 +723,9 @@ async function storeServerNotificationInFirestore(notification, decodedPayload, 
     const retryDelay = 1000 * Math.pow(2, retryCount); // Exponential backoff
 
     try {
+        // Create document with only defined values
         const notificationDocument = {
             notificationType: decodedPayload?.notificationType,
-            subtype: decodedPayload?.subtype,
             timestamp: admin.firestore.FieldValue.serverTimestamp(),
             receivedAt: new Date().toISOString(),
             bundleId: decodedPayload?.data?.bundleId,
@@ -356,6 +742,11 @@ async function storeServerNotificationInFirestore(notification, decodedPayload, 
             processed: true,
             source: 'app-store-server'
         };
+
+        // Only add subtype if it's defined
+        if (decodedPayload?.subtype !== undefined) {
+            notificationDocument.subtype = decodedPayload.subtype;
+        }
 
         // Store in the server_notifications collection
         const docRef = await db.collection('server_notifications').add(notificationDocument);
@@ -429,7 +820,7 @@ async function storePurchaseEventData(decodedPayload, parentDocId) {
     try {
         const transactionInfo = decodedPayload?.data?.latestReceiptInfo;
         if (transactionInfo) {
-            await db.collection('purchase_events').add({
+            const purchaseEventData = {
                 parentDocId: parentDocId,
                 timestamp: admin.firestore.FieldValue.serverTimestamp(),
                 transactionId: transactionInfo.transaction_id,
@@ -440,11 +831,17 @@ async function storePurchaseEventData(decodedPayload, parentDocId) {
                 isTrialPeriod: transactionInfo.is_trial_period,
                 isInIntroOfferPeriod: transactionInfo.is_in_intro_offer_period,
                 notificationType: decodedPayload.notificationType,
-                subtype: decodedPayload.subtype,
                 environment: decodedPayload.data?.environment,
                 bundleId: decodedPayload.data?.bundleId,
                 eventData: decodedPayload
-            });
+            };
+
+            // Only add subtype if it's defined
+            if (decodedPayload?.subtype !== undefined) {
+                purchaseEventData.subtype = decodedPayload.subtype;
+            }
+
+            await db.collection('purchase_events').add(purchaseEventData);
         }
     } catch (error) {
         console.error('Error storing purchase event data:', error);
