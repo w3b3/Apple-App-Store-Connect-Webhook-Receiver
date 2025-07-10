@@ -2,8 +2,38 @@ const express = require('express');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const jwksClient = require('jwks-rsa');
+const admin = require('firebase-admin');
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Initialize Firebase Admin SDK if Firestore is enabled
+let db = null;
+if (process.env.FIRESTORE_ENABLED === 'true') {
+    try {
+        // Initialize Firebase Admin SDK
+        if (!admin.apps.length) {
+            admin.initializeApp({
+                credential: admin.credential.applicationDefault(),
+                projectId: process.env.FIREBASE_PROJECT_ID
+            });
+        }
+        
+        // Get Firestore database instance
+        db = admin.firestore();
+        console.log('Firestore initialized successfully');
+        
+        // Configure Firestore settings
+        db.settings({
+            timestampsInSnapshots: true
+        });
+        
+    } catch (error) {
+        console.error('Failed to initialize Firestore:', error);
+        console.log('Continuing without Firestore integration');
+    }
+} else {
+    console.log('Firestore integration disabled');
+}
 
 // JWKS client for Apple's public keys
 const client = jwksClient({
@@ -105,7 +135,7 @@ app.get('/', (req, res) => {
 });
 
 // Apple App Store Connect webhook endpoint
-app.post('/webhook/app-store-connect', (req, res) => {
+app.post('/webhook/app-store-connect', async (req, res) => {
     try {
         const payload = req.body;
         const signature = req.headers['x-app-store-signature'];
@@ -131,14 +161,14 @@ app.post('/webhook/app-store-connect', (req, res) => {
             webhookData = JSON.parse(payloadString);
         } catch (parseError) {
             console.error('Failed to parse webhook payload:', parseError);
-            return res.status(400).json({ error: 'Invalid JSON payload' });
+            return res.status(400).json(createErrorResponse(400, 'Invalid JSON payload', parseError.message));
         }
 
         // Verify signature if secret is provided
         if (webhookSecret && signature) {
             if (!verifyWebhookSignature(payloadString, signature, webhookSecret)) {
                 console.error('Invalid webhook signature');
-                return res.status(401).json({ error: 'Invalid signature' });
+                return res.status(401).json(createErrorResponse(401, 'Invalid signature'));
             }
             console.log('Webhook signature verified successfully');
         } else if (webhookSecret && !signature) {
@@ -153,19 +183,27 @@ app.post('/webhook/app-store-connect', (req, res) => {
         const eventType = webhookData.data?.data?.type || webhookData.data?.type || webhookData.eventType;
         console.log('Processing event type:', eventType);
 
-        // Process the webhook event
-        processWebhookEvent(webhookData, eventType);
+        // Process the webhook event with metadata
+        const metadata = {
+            userAgent: req.headers['user-agent'],
+            contentType: req.headers['content-type'],
+            hasSignature: !!signature,
+            signatureVerified: webhookSecret && signature ? verifyWebhookSignature(payloadString, signature, webhookSecret) : false
+        };
+        
+        const result = await processWebhookEvent(webhookData, eventType, metadata);
 
         res.status(200).json({ 
             status: 'success',
             message: 'Webhook processed successfully',
             eventType: eventType,
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
+            stored: result?.success || false
         });
 
     } catch (error) {
         console.error('Error processing webhook:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json(createErrorResponse(500, 'Internal server error', error.message));
     }
 });
 
@@ -193,13 +231,13 @@ app.post('/webhook/app-store-server-notifications', async (req, res) => {
             notificationData = JSON.parse(payloadString);
         } catch (parseError) {
             console.error('Failed to parse server notification payload:', parseError);
-            return res.status(400).json({ error: 'Invalid JSON payload' });
+            return res.status(400).json(createErrorResponse(400, 'Invalid JSON payload', parseError.message));
         }
 
         // App Store Server Notifications always have a signedPayload
         if (!notificationData.signedPayload) {
             console.error('Missing signedPayload in server notification');
-            return res.status(400).json({ error: 'Missing signedPayload' });
+            return res.status(400).json(createErrorResponse(400, 'Missing signedPayload'));
         }
 
         // Verify JWT signature
@@ -210,26 +248,260 @@ app.post('/webhook/app-store-server-notifications', async (req, res) => {
             console.log('JWT signature verified successfully');
         } catch (jwtError) {
             console.error('JWT signature verification failed:', jwtError.message);
-            return res.status(401).json({ error: 'Invalid JWT signature' });
+            return res.status(401).json(createErrorResponse(401, 'Invalid JWT signature', jwtError.message));
         }
         
-        // Process the server notification with decoded payload
-        processServerNotification(notificationData, decodedPayload);
+        // Process the server notification with decoded payload and metadata
+        const metadata = {
+            userAgent: req.headers['user-agent'],
+            contentType: req.headers['content-type'],
+            jwtVerified: true
+        };
+        
+        const result = await processServerNotification(notificationData, decodedPayload, metadata);
 
         res.status(200).json({ 
             status: 'success',
             message: 'Server notification processed successfully',
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
+            stored: result?.success || false
         });
 
     } catch (error) {
         console.error('Error processing server notification:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json(createErrorResponse(500, 'Internal server error', error.message));
     }
 });
 
+// Firestore Storage Functions with Retry Logic
+async function storeWebhookEventInFirestore(event, eventType, metadata = {}, retryCount = 0) {
+    if (!db) {
+        console.log('Firestore not available, skipping storage');
+        return { success: false, error: 'Firestore not available' };
+    }
+
+    const maxRetries = 3;
+    const retryDelay = 1000 * Math.pow(2, retryCount); // Exponential backoff
+
+    try {
+        const eventDocument = {
+            eventType: eventType,
+            timestamp: admin.firestore.FieldValue.serverTimestamp(),
+            receivedAt: new Date().toISOString(),
+            data: event,
+            metadata: {
+                userAgent: metadata.userAgent || null,
+                contentType: metadata.contentType || null,
+                hasSignature: metadata.hasSignature || false,
+                signatureVerified: metadata.signatureVerified || false,
+                retryCount: retryCount,
+                ...metadata
+            },
+            processed: true,
+            source: 'app-store-connect'
+        };
+
+        // Store in the webhook_events collection
+        const docRef = await db.collection('webhook_events').add(eventDocument);
+        console.log('Webhook event stored in Firestore:', docRef.id);
+        
+        // Store event type specific data if needed
+        await storeEventTypeSpecificData(eventType, event, docRef.id);
+        
+        return { success: true, docId: docRef.id };
+        
+    } catch (error) {
+        console.error(`Error storing webhook event in Firestore (attempt ${retryCount + 1}):`, error);
+        
+        // Check if this is a retryable error
+        if (retryCount < maxRetries && isRetryableError(error)) {
+            console.log(`Retrying in ${retryDelay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+            return storeWebhookEventInFirestore(event, eventType, metadata, retryCount + 1);
+        }
+        
+        // Log failed storage attempt for monitoring
+        await logFailedStorage('webhook_event', { eventType, error: error.message, retryCount });
+        
+        return { success: false, error: error.message };
+    }
+}
+
+async function storeServerNotificationInFirestore(notification, decodedPayload, metadata = {}, retryCount = 0) {
+    if (!db) {
+        console.log('Firestore not available, skipping storage');
+        return { success: false, error: 'Firestore not available' };
+    }
+
+    const maxRetries = 3;
+    const retryDelay = 1000 * Math.pow(2, retryCount); // Exponential backoff
+
+    try {
+        const notificationDocument = {
+            notificationType: decodedPayload?.notificationType,
+            subtype: decodedPayload?.subtype,
+            timestamp: admin.firestore.FieldValue.serverTimestamp(),
+            receivedAt: new Date().toISOString(),
+            bundleId: decodedPayload?.data?.bundleId,
+            environment: decodedPayload?.data?.environment,
+            originalNotification: notification,
+            decodedPayload: decodedPayload,
+            metadata: {
+                userAgent: metadata.userAgent || null,
+                contentType: metadata.contentType || null,
+                jwtVerified: metadata.jwtVerified || false,
+                retryCount: retryCount,
+                ...metadata
+            },
+            processed: true,
+            source: 'app-store-server'
+        };
+
+        // Store in the server_notifications collection
+        const docRef = await db.collection('server_notifications').add(notificationDocument);
+        console.log('Server notification stored in Firestore:', docRef.id);
+        
+        // Store purchase/subscription specific data
+        await storePurchaseEventData(decodedPayload, docRef.id);
+        
+        return { success: true, docId: docRef.id };
+        
+    } catch (error) {
+        console.error(`Error storing server notification in Firestore (attempt ${retryCount + 1}):`, error);
+        
+        // Check if this is a retryable error
+        if (retryCount < maxRetries && isRetryableError(error)) {
+            console.log(`Retrying in ${retryDelay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+            return storeServerNotificationInFirestore(notification, decodedPayload, metadata, retryCount + 1);
+        }
+        
+        // Log failed storage attempt for monitoring
+        await logFailedStorage('server_notification', { 
+            notificationType: decodedPayload?.notificationType, 
+            error: error.message, 
+            retryCount 
+        });
+        
+        return { success: false, error: error.message };
+    }
+}
+
+async function storeEventTypeSpecificData(eventType, event, parentDocId) {
+    if (!db) return;
+
+    try {
+        switch (eventType) {
+            case 'APP_STORE_VERSION_STATE_CHANGED':
+                await db.collection('app_version_events').add({
+                    parentDocId: parentDocId,
+                    timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                    appId: event.data?.attributes?.appId,
+                    versionString: event.data?.attributes?.versionString,
+                    platform: event.data?.attributes?.platform,
+                    appStoreState: event.data?.attributes?.appStoreState,
+                    previousState: event.data?.attributes?.previousAppStoreState,
+                    eventData: event
+                });
+                break;
+                
+            case 'TESTFLIGHT_BETA_FEEDBACK_RECEIVED':
+                await db.collection('testflight_feedback').add({
+                    parentDocId: parentDocId,
+                    timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                    feedbackId: event.data?.id,
+                    appId: event.data?.attributes?.appId,
+                    betaGroupName: event.data?.attributes?.betaGroupName,
+                    buildVersion: event.data?.attributes?.buildVersion,
+                    rating: event.data?.attributes?.rating,
+                    eventData: event
+                });
+                break;
+        }
+    } catch (error) {
+        console.error('Error storing event-specific data:', error);
+    }
+}
+
+async function storePurchaseEventData(decodedPayload, parentDocId) {
+    if (!db) return;
+
+    try {
+        const transactionInfo = decodedPayload?.data?.latestReceiptInfo;
+        if (transactionInfo) {
+            await db.collection('purchase_events').add({
+                parentDocId: parentDocId,
+                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                transactionId: transactionInfo.transaction_id,
+                originalTransactionId: transactionInfo.original_transaction_id,
+                productId: transactionInfo.product_id,
+                purchaseDate: transactionInfo.purchase_date_ms ? new Date(parseInt(transactionInfo.purchase_date_ms)) : null,
+                expiresDate: transactionInfo.expires_date_ms ? new Date(parseInt(transactionInfo.expires_date_ms)) : null,
+                isTrialPeriod: transactionInfo.is_trial_period,
+                isInIntroOfferPeriod: transactionInfo.is_in_intro_offer_period,
+                notificationType: decodedPayload.notificationType,
+                subtype: decodedPayload.subtype,
+                environment: decodedPayload.data?.environment,
+                bundleId: decodedPayload.data?.bundleId,
+                eventData: decodedPayload
+            });
+        }
+    } catch (error) {
+        console.error('Error storing purchase event data:', error);
+    }
+}
+
+// Error handling helper functions
+function isRetryableError(error) {
+    // Check for common retryable Firebase errors
+    const retryableErrors = [
+        'UNAVAILABLE',
+        'DEADLINE_EXCEEDED',
+        'RESOURCE_EXHAUSTED',
+        'INTERNAL',
+        'ABORTED'
+    ];
+    
+    return retryableErrors.some(code => 
+        error.code === code || 
+        error.message.includes(code) ||
+        error.message.includes('timeout') ||
+        error.message.includes('network')
+    );
+}
+
+async function logFailedStorage(type, details) {
+    try {
+        if (!db) return;
+        
+        await db.collection('failed_storage_attempts').add({
+            type: type,
+            timestamp: admin.firestore.FieldValue.serverTimestamp(),
+            details: details,
+            environment: process.env.NODE_ENV || 'development'
+        });
+    } catch (error) {
+        console.error('Error logging failed storage attempt:', error);
+    }
+}
+
+// Enhanced error response helper
+function createErrorResponse(statusCode, message, details = null) {
+    const response = {
+        error: message,
+        timestamp: new Date().toISOString(),
+        status: statusCode
+    };
+    
+    if (details && process.env.NODE_ENV !== 'production') {
+        response.details = details;
+    }
+    
+    return response;
+}
+
 // Process different webhook event types
-function processWebhookEvent(event, eventType) {
+async function processWebhookEvent(event, eventType, metadata = {}) {
     console.log('Processing webhook event:', {
         eventType: eventType,
         timestamp: new Date().toISOString(),
@@ -271,13 +543,12 @@ function processWebhookEvent(event, eventType) {
             console.log('Unknown event type:', eventType, event);
     }
 
-    // TODO: Add Firestore integration here
-    // For now, we'll just log the events
-    // Future: storeEventInFirestore(event);
+    // Store event in Firestore
+    return await storeWebhookEventInFirestore(event, eventType, metadata);
 }
 
 // Process App Store Server Notifications (in-app purchases)
-function processServerNotification(notification, decodedPayload) {
+async function processServerNotification(notification, decodedPayload, metadata = {}) {
     console.log('Processing server notification:', {
         timestamp: new Date().toISOString(),
         hasSignedPayload: !!notification.signedPayload,
@@ -350,19 +621,19 @@ function processServerNotification(notification, decodedPayload) {
             });
     }
     
-    // TODO: Add Firestore integration for purchase events
-    // storePurchaseEventInFirestore(decodedPayload);
+    // Store server notification in Firestore
+    return await storeServerNotificationInFirestore(notification, decodedPayload, metadata);
 }
 
 // Error handling middleware
 app.use((error, req, res, next) => {
     console.error('Unhandled error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json(createErrorResponse(500, 'Internal server error', error.message));
 });
 
 // 404 handler
 app.use('*', (req, res) => {
-    res.status(404).json({ error: 'Endpoint not found' });
+    res.status(404).json(createErrorResponse(404, 'Endpoint not found', `Path ${req.originalUrl} not found`));
 });
 
 app.listen(PORT, () => {
