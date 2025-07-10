@@ -1,10 +1,33 @@
 # Apple App Store Connect Webhook Receiver
 
-A lightweight, secure webhook receiver for Apple App Store Connect notifications, designed to run on AWS EC2 with nginx and SSL support.
+A lightweight, secure webhook receiver for Apple App Store Connect notifications, designed to run on AWS EC2 with nginx and SSL support. Built with a modular architecture for better maintainability and scalability.
 
 ## Overview
 
 This service receives webhook notifications from Apple App Store Connect and can be configured to store events in Firestore or other databases. It's built with Node.js 20+, Express, and includes proper signature verification for security.
+
+### Architecture
+
+The application follows a modular architecture with clear separation of concerns:
+
+```
+src/
+├── app.js                     # Main application entry point
+├── config/
+│   └── index.js              # Configuration management
+├── auth/
+│   └── index.js              # Authentication services
+├── database/
+│   └── firestore.js          # Firestore database operations
+├── services/
+│   └── appleApi.js           # Apple API service
+├── handlers/
+│   └── webhookHandlers.js    # Webhook event processing
+├── middleware/
+│   └── index.js              # Express middleware
+└── routes/
+    └── index.js              # Route definitions
+```
 
 ## Features
 
@@ -33,13 +56,13 @@ This service receives webhook notifications from Apple App Store Connect and can
 ### 1. Deploy the Service
 
 ```bash
-# Copy files to your EC2 instance
-scp webhook-receiver.js package.json deploy.sh ubuntu@44.212.121.39:~/
+# Copy all files to your EC2 instance
+scp -r src/ package.json deploy-with-test-notifications.sh ubuntu@44.212.121.39:~/
 
 # SSH to your server and deploy
 ssh ubuntu@44.212.121.39
-chmod +x deploy.sh
-./deploy.sh
+chmod +x deploy-with-test-notifications.sh
+./deploy-with-test-notifications.sh
 ```
 
 ### 2. Configure Nginx and SSL
@@ -155,6 +178,7 @@ sudo systemctl restart nginx
 
 ### Service Configuration
 - **Application**: `/opt/webhook-receiver/`
+- **Source Code**: `/opt/webhook-receiver/src/`
 - **Environment**: `/opt/webhook-receiver/.env`
 - **Systemd Service**: `/etc/systemd/system/webhook-receiver.service`
 
@@ -458,7 +482,7 @@ async function storeEventInFirestore(event) {
 }
 ```
 
-## Architecture
+## System Architecture
 
 ```
 Apple App Store Connect
@@ -469,8 +493,20 @@ Apple App Store Connect
         ↓
    [Node.js Service (Port 3001)]
         ↓
-   [Future: Firestore Database]
+   [Firestore Database]
 ```
+
+### Application Architecture
+
+The application is built with a modular architecture that separates concerns:
+
+- **Configuration Layer**: Centralized environment and application settings
+- **Authentication Layer**: JWT verification and signature validation
+- **Database Layer**: Firestore integration with retry logic
+- **Service Layer**: Apple API interactions and external services
+- **Handler Layer**: Business logic for processing webhook events
+- **Middleware Layer**: Request processing and error handling
+- **Route Layer**: API endpoint definitions and request routing
 
 ## Server Information
 
