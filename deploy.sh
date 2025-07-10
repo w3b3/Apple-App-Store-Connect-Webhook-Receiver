@@ -59,8 +59,12 @@ cp package.json $APP_DIR/
 cd $APP_DIR
 
 # Install dependencies
-print_status "Installing dependencies..."
-npm install --production
+echo "Installing dependencies..."
+npm install
+
+# Install firebase-admin for Firestore integration
+echo "Installing Firebase Admin SDK..."
+npm install firebase-admin
 
 # Create environment file from template
 print_status "Creating environment file from template..."
