@@ -9,13 +9,15 @@ This service receives webhook notifications from Apple App Store Connect and can
 ## Features
 
 - ✅ **Secure webhook verification** with HMAC-SHA256 signature validation
+- ✅ **JWT signature verification** for App Store Server Notifications
 - ✅ **Multiple event type support** (app version changes, TestFlight feedback, etc.)
+- ✅ **Firestore integration** with automatic retry logic and error handling
 - ✅ **Health check endpoint** for monitoring
 - ✅ **Nginx reverse proxy** with SSL support
 - ✅ **Systemd service** for automatic startup and management
 - ✅ **Structured logging** with timestamps
 - ✅ **Graceful shutdown** handling
-- ✅ **Ready for Firestore integration**
+- ✅ **Comprehensive error handling** with proper HTTP status codes
 
 ## Supported Webhook Events
 
@@ -97,6 +99,12 @@ POST /webhook/app-store-connect
 ```
 Receives webhook notifications from Apple App Store Connect.
 
+### Server Notifications Endpoint
+```
+POST /webhook/app-store-server-notifications
+```
+Receives App Store Server Notifications for in-app purchases and subscriptions.
+
 ## Service Management
 
 ### Systemd Commands
@@ -146,6 +154,189 @@ sudo systemctl restart nginx
 NODE_ENV=production
 PORT=3001
 APP_STORE_WEBHOOK_SECRET=your-webhook-secret-here
+
+# Firestore Configuration
+GOOGLE_APPLICATION_CREDENTIALS=/opt/webhook-receiver/service-account-key.json
+FIREBASE_PROJECT_ID=your-firebase-project-id
+FIRESTORE_ENABLED=true
+```
+
+## Firestore Integration
+
+The webhook receiver automatically stores all webhook events and server notifications in Firestore with the following features:
+
+### Collections Schema
+
+#### `webhook_events` Collection
+Stores all App Store Connect webhook events:
+```javascript
+{
+  eventType: "APP_STORE_VERSION_STATE_CHANGED",
+  timestamp: Firestore.Timestamp,
+  receivedAt: "2024-01-01T00:00:00.000Z",
+  data: { /* original webhook payload */ },
+  metadata: {
+    userAgent: "Apple/1.0",
+    contentType: "application/json",
+    hasSignature: true,
+    signatureVerified: true,
+    retryCount: 0
+  },
+  processed: true,
+  source: "app-store-connect"
+}
+```
+
+#### `server_notifications` Collection
+Stores App Store Server Notifications:
+```javascript
+{
+  notificationType: "SUBSCRIBED",
+  subtype: "INITIAL_BUY",
+  timestamp: Firestore.Timestamp,
+  receivedAt: "2024-01-01T00:00:00.000Z",
+  bundleId: "com.yourapp.bundle",
+  environment: "Production",
+  originalNotification: { /* original notification */ },
+  decodedPayload: { /* decoded JWT payload */ },
+  metadata: {
+    userAgent: "Apple/1.0",
+    contentType: "application/json",
+    jwtVerified: true,
+    retryCount: 0
+  },
+  processed: true,
+  source: "app-store-server"
+}
+```
+
+#### `purchase_events` Collection
+Stores detailed purchase/subscription data:
+```javascript
+{
+  parentDocId: "reference-to-server-notification",
+  timestamp: Firestore.Timestamp,
+  transactionId: "1000000123456789",
+  originalTransactionId: "1000000123456789",
+  productId: "com.yourapp.premium",
+  purchaseDate: Firestore.Timestamp,
+  expiresDate: Firestore.Timestamp,
+  isTrialPeriod: false,
+  isInIntroOfferPeriod: false,
+  notificationType: "SUBSCRIBED",
+  subtype: "INITIAL_BUY",
+  environment: "Production",
+  bundleId: "com.yourapp.bundle",
+  eventData: { /* full decoded payload */ }
+}
+```
+
+#### `app_version_events` Collection
+Stores app version state changes:
+```javascript
+{
+  parentDocId: "reference-to-webhook-event",
+  timestamp: Firestore.Timestamp,
+  appId: "1234567890",
+  versionString: "1.0.0",
+  platform: "IOS",
+  appStoreState: "READY_FOR_SALE",
+  previousState: "PENDING_DEVELOPER_RELEASE",
+  eventData: { /* full webhook payload */ }
+}
+```
+
+#### `testflight_feedback` Collection
+Stores TestFlight feedback events:
+```javascript
+{
+  parentDocId: "reference-to-webhook-event",
+  timestamp: Firestore.Timestamp,
+  feedbackId: "feedback-123",
+  appId: "1234567890",
+  betaGroupName: "Internal Testing",
+  buildVersion: "1.0.0 (100)",
+  rating: 5,
+  eventData: { /* full webhook payload */ }
+}
+```
+
+#### `failed_storage_attempts` Collection
+Logs failed storage attempts for monitoring:
+```javascript
+{
+  type: "webhook_event",
+  timestamp: Firestore.Timestamp,
+  details: {
+    eventType: "APP_STORE_VERSION_STATE_CHANGED",
+    error: "DEADLINE_EXCEEDED",
+    retryCount: 3
+  },
+  environment: "production"
+}
+```
+
+### Retry Logic
+
+The system implements exponential backoff retry logic for failed Firestore operations:
+
+- **Maximum Retries**: 3 attempts
+- **Retry Delay**: 1s, 2s, 4s (exponential backoff)
+- **Retryable Errors**: `UNAVAILABLE`, `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`, `INTERNAL`, `ABORTED`
+- **Timeout/Network Errors**: Automatically retried
+
+### Setup Instructions
+
+1. **Create Firebase Project**:
+   ```bash
+   # Visit https://console.firebase.google.com/
+   # Create a new project
+   # Enable Firestore Database
+   ```
+
+2. **Generate Service Account Key**:
+   ```bash
+   # In Firebase Console: Project Settings → Service Accounts
+   # Generate new private key
+   # Download JSON file
+   ```
+
+3. **Configure Environment**:
+   ```bash
+   # Copy service account key to server
+   scp service-account-key.json ubuntu@44.212.121.39:/opt/webhook-receiver/
+   
+   # Update environment variables
+   sudo nano /opt/webhook-receiver/.env
+   ```
+
+4. **Restart Service**:
+   ```bash
+   sudo systemctl restart webhook-receiver
+   ```
+
+### Monitoring Firestore
+
+Check storage status in webhook responses:
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"data":{"type":"PING"}}' \
+  https://apple.emitajuba.com.br/webhook/app-store-connect
+
+# Response includes storage status:
+{
+  "status": "success",
+  "message": "Webhook processed successfully",
+  "eventType": "PING",
+  "timestamp": "2024-01-01T00:00:00.000Z",
+  "stored": true
+}
+```
+
+View failed storage attempts:
+```bash
+sudo journalctl -u webhook-receiver -f | grep -i "failed storage"
 ```
 
 ## Security Features
