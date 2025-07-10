@@ -10,6 +10,7 @@ This service receives webhook notifications from Apple App Store Connect and can
 
 - ✅ **Secure webhook verification** with HMAC-SHA256 signature validation
 - ✅ **JWT signature verification** for App Store Server Notifications
+- ✅ **Test notification API** for testing webhook endpoints directly from Apple
 - ✅ **Multiple event type support** (app version changes, TestFlight feedback, etc.)
 - ✅ **Firestore integration** with automatic retry logic and error handling
 - ✅ **Health check endpoint** for monitoring
@@ -104,6 +105,19 @@ Receives webhook notifications from Apple App Store Connect.
 POST /webhook/app-store-server-notifications
 ```
 Receives App Store Server Notifications for in-app purchases and subscriptions.
+
+### Test Notification Endpoints
+```
+POST /test/request-notification
+```
+Requests a test notification from Apple's servers to verify your webhook endpoint is working correctly.
+
+```
+GET /test/notification-status/:token
+```
+Checks the status of a previously requested test notification.
+
+**Note**: Test notifications require additional configuration. See [TEST_NOTIFICATIONS.md](TEST_NOTIFICATIONS.md) for detailed setup instructions.
 
 ## Service Management
 
