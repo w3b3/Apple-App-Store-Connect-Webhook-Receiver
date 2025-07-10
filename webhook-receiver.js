@@ -37,48 +37,9 @@ if (process.env.FIRESTORE_ENABLED === 'true') {
     console.log('Firestore integration disabled');
 }
 
-// Apple root certificates for certificate chain validation
-const APPLE_ROOT_CA_G3 = `-----BEGIN CERTIFICATE-----
-MIICQzCCAcmgAwIBAgIILcX8iNLFS5UwCgYIKoZIzj0EAwMwZzEbMBkGA1UEAwwS
-QXBwbGUgUm9vdCBDQSAtIEczMSYwJAYDVQQLDB1BcHBsZSBDZXJ0aWZpY2F0aW9u
-IEF1dGhvcml0eTETMBEGA1UECgwKQXBwbGUgSW5jLjELMAkGA1UEBhMCVVMwHhcN
-MTQwNDMwMTgxOTA2WhcNMzkwNDMwMTgxOTA2WjBnMRswGQYDVQQDDBJBcHBsZSBS
-b290IENBIC0gRzMxJjAkBgNVBAsMHUFwcGxlIENlcnRpZmljYXRpb24gQXV0aG9y
-aXR5MRMwEQYDVQQKDApBcHBsZSBJbmMuMQswCQYDVQQGEwJVUzB2MBAGByqGSM49
-AgEGBSuBBAAiA2IABJjpLz1AcqTtkyJygRMc3RCV8cWjTnHcFBbZDuWmBSp3ZHtf
-TjjTuxxEtX/1H7YyYl3J6YRbTzBPEVoA/VhYDKX1DyxNB0cTddqXl5dvMVztK517
-IDvYuVTZXpmkOlEKMaNCMEAwHQYDVR0OBBYEFLuw3qFYM4iapIqZ3r6966/ayySr
-MA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEGMAoGCCqGSM49BAMDA2gA
-MGUCMQCD6cHEFl4aXTQY2e3v9GwOAEZLuN+yRhHFD/3meoyhpmvOwgPUnPWTxnS4
-at+qIxUCMG1mihDK1A3UT82NQz60imOlM27jbdoXt2QfyFMm+YhidDkLF1vLUagM
-6BgD56KyUM9o6g==
------END CERTIFICATE-----`;
 
-// Extract public key from x5c certificate chain
-function extractPublicKeyFromX5C(x5cChain) {
-    if (!x5cChain || !Array.isArray(x5cChain) || x5cChain.length === 0) {
-        throw new Error('Invalid x5c certificate chain');
-    }
-    
-    // The leaf certificate is the last certificate in the chain
-    const leafCertBase64 = x5cChain[x5cChain.length - 1];
-    const leafCertPem = `-----BEGIN CERTIFICATE-----\n${leafCertBase64}\n-----END CERTIFICATE-----`;
-    
-    try {
-        // Extract the public key from the certificate
-        const cert = crypto.X509Certificate ? new crypto.X509Certificate(leafCertPem) : null;
-        if (cert) {
-            // Use the public key from the certificate
-            return cert.publicKey;
-        } else {
-            // Fallback to using the certificate directly
-            return leafCertPem;
-        }
-    } catch (error) {
-        console.warn('Failed to extract public key from certificate, using certificate directly:', error.message);
-        return leafCertPem;
-    }
-}
+
+
 
 // Validate certificate chain (basic validation - in production you'd want more thorough validation)
 function validateCertificateChain(x5cChain) {
@@ -124,129 +85,23 @@ async function verifyAppleJWT(token) {
         const leafCertBase64 = x5cChain[0];
         const leafCertPem = `-----BEGIN CERTIFICATE-----\n${leafCertBase64}\n-----END CERTIFICATE-----`;
 
-        // Try using node-jose for JWT verification (recommended for ES256)
-        try {
-            // Import the certificate as a key
-            const key = await jose.JWK.asKey(leafCertPem, 'pem');
-            
-            // Verify the JWT
-            const result = await jose.JWS.createVerify(key).verify(token);
-            
-            // Parse the payload
-            const payload = JSON.parse(result.payload.toString());
-            
-            console.log('JWT verification successful using node-jose');
-            return payload;
-            
-        } catch (joseError) {
-            console.log('node-jose verification failed:', joseError.message);
-            
-            // Fallback to Node.js crypto verification
-            try {
-                // Extract public key from certificate
-                const cert = new crypto.X509Certificate(leafCertPem);
-                const publicKey = cert.publicKey;
-                
-                // Verify using jsonwebtoken library (handles ES256 properly)
-                const verifiedPayload = jwt.verify(token, publicKey, {
-                    algorithms: ['ES256'],
-                    complete: false
-                });
-                
-                console.log('JWT verification successful using jsonwebtoken library');
-                return verifiedPayload;
-                
-            } catch (jwtError) {
-                console.log('jsonwebtoken verification failed:', jwtError.message);
-                
-                // Final fallback to manual ECDSA verification
-                try {
-                    const parts = token.split('.');
-                    if (parts.length !== 3) {
-                        throw new Error('Invalid JWT format');
-                    }
-                    
-                    const header = parts[0];
-                    const payload = parts[1];
-                    const signature = parts[2];
-                    
-                    // Create the signing input
-                    const signingInput = `${header}.${payload}`;
-                    
-                    // Decode the signature from base64url
-                    const signatureBuffer = Buffer.from(signature.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
-                    
-                    // For ES256, we need to handle the signature format properly
-                    // ES256 signatures are 64 bytes (32 bytes r + 32 bytes s)
-                    if (signatureBuffer.length !== 64) {
-                        throw new Error(`Invalid ES256 signature length: ${signatureBuffer.length} bytes`);
-                    }
-                    
-                    // Extract public key and verify
-                    const cert = new crypto.X509Certificate(leafCertPem);
-                    const publicKey = cert.publicKey;
-                    
-                    // Create a verify object for ECDSA
-                    const verify = crypto.createVerify('sha256');
-                    verify.update(signingInput);
-                    
-                    // Convert the signature to DER format for verification
-                    const derSignature = convertRawToDER(signatureBuffer);
-                    
-                    const isValid = verify.verify(publicKey, derSignature);
-                    
-                    if (isValid) {
-                        console.log('JWT verification successful using manual ECDSA verification');
-                        return decoded.payload;
-                    } else {
-                        throw new Error('ECDSA signature verification failed');
-                    }
-                    
-                } catch (manualError) {
-                    console.log('Manual ECDSA verification failed:', manualError.message);
-                    throw new Error(`All JWT verification methods failed. node-jose: ${joseError.message}, jsonwebtoken: ${jwtError.message}, manual: ${manualError.message}`);
-                }
-            }
-        }
+        // Use node-jose for JWT verification
+        const key = await jose.JWK.asKey(leafCertPem, 'pem');
+        const result = await jose.JWS.createVerify(key).verify(token);
+        
+        // Parse the payload
+        const payload = JSON.parse(result.payload.toString());
+        
+        console.log('JWT verification successful');
+        return payload;
         
     } catch (error) {
-        console.error('Error in JWT verification process:', error);
-        throw error;
+        console.error('JWT verification failed:', error.message);
+        throw new Error(`JWT verification failed: ${error.message}`);
     }
 }
 
-// Convert raw ECDSA signature to DER format
-function convertRawToDER(rawSignature) {
-    if (rawSignature.length !== 64) {
-        throw new Error('Invalid raw signature length');
-    }
-    
-    const r = rawSignature.slice(0, 32);
-    const s = rawSignature.slice(32, 64);
-    
-    // Remove leading zeros but keep at least one byte
-    function removeLeadingZeros(buffer) {
-        let start = 0;
-        while (start < buffer.length - 1 && buffer[start] === 0) {
-            start++;
-        }
-        return buffer.slice(start);
-    }
-    
-    const rTrimmed = removeLeadingZeros(r);
-    const sTrimmed = removeLeadingZeros(s);
-    
-    // Add 0x00 prefix if the first bit is set (to ensure positive integers)
-    const rPadded = (rTrimmed[0] & 0x80) ? Buffer.concat([Buffer.from([0x00]), rTrimmed]) : rTrimmed;
-    const sPadded = (sTrimmed[0] & 0x80) ? Buffer.concat([Buffer.from([0x00]), sTrimmed]) : sTrimmed;
-    
-    // Build DER sequence
-    const rDER = Buffer.concat([Buffer.from([0x02, rPadded.length]), rPadded]);
-    const sDER = Buffer.concat([Buffer.from([0x02, sPadded.length]), sPadded]);
-    const sequence = Buffer.concat([rDER, sDER]);
-    
-    return Buffer.concat([Buffer.from([0x30, sequence.length]), sequence]);
-}
+
 
 // Create JWT for App Store Server API authentication
 function createAppStoreServerAPIJWT() {
