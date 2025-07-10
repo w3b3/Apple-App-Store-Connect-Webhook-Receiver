@@ -2,10 +2,10 @@
   "name": "apple-app-store-webhook-receiver",
   "version": "1.0.0",
   "description": "Lightweight webhook receiver for Apple App Store Connect notifications",
-  "main": "webhook-receiver.js",
+  "main": "src/app.js",
   "scripts": {
-    "start": "node webhook-receiver.js",
-    "dev": "nodemon webhook-receiver.js",
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js",
     "test": "node test-notifications.js",
     "test:basic": "echo \"Error: no test specified\" && exit 1"
   },
