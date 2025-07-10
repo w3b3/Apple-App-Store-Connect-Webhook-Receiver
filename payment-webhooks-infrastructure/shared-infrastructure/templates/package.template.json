@@ -1,0 +1,35 @@
+{
+  "name": "SERVICE_NAME_PLACEHOLDER",
+  "version": "1.0.0",
+  "description": "DESCRIPTION_PLACEHOLDER",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js",
+    "test": "jest",
+    "test:watch": "jest --watch"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.0.0",
+    "dotenv": "^16.3.1",
+    "firebase-admin": "^11.10.1",
+    "crypto": "^1.0.1",
+    "jsonwebtoken": "^9.0.2",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1",
+    "jest": "^29.6.2"
+  },
+  "keywords": [
+    "webhook",
+    "PROVIDER_KEYWORD_PLACEHOLDER",
+    "nodejs",
+    "express",
+    "firestore"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+} 

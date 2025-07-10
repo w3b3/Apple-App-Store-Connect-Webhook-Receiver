@@ -1,4 +1,0 @@
-.env
-*.p8
-node_modules
-service-account-key.json
