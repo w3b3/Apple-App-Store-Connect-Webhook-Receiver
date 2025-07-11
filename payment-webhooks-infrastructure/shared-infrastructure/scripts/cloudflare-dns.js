@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+// Load environment variables from .env file
+require('dotenv').config();
+
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
@@ -231,6 +234,8 @@ Commands:
 Environment Variables:
   CLOUDFLARE_TOKEN - Cloudflare API token
   CLOUDFLARE_ZONE_ID - Cloudflare zone ID
+  
+Note: Environment variables can be set in a .env file in the same directory as this script.
         `);
         process.exit(1);
     }
