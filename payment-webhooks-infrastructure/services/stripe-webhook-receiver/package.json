@@ -1,0 +1,35 @@
+{
+  "name": "stripe-webhook-receiver",
+  "version": "1.0.0",
+  "description": "Stripe webhook receiver service for processing Stripe events and storing them in Firestore",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js",
+    "test": "jest",
+    "test:watch": "jest --watch"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.0.0",
+    "dotenv": "^16.3.1",
+    "firebase-admin": "^11.10.1",
+    "crypto": "^1.0.1",
+    "stripe": "^13.11.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1",
+    "jest": "^29.6.2"
+  },
+  "keywords": [
+    "webhook",
+    "stripe",
+    "payments",
+    "nodejs",
+    "express",
+    "firestore"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+} 
